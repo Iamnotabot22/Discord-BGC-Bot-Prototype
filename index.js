@@ -108,6 +108,61 @@ function makeEmbed(title, description, color = 0x0099ff) {
 }
 
 /**
+ * Robust fetch with retries, backoff and timeout
+ * Returns parsed JSON on success or throws an error
+ */
+async function fetchWithRetry(url, options = {}, retries = 3, backoff = 500, timeout = 8000) {
+    for (let attempt = 0; attempt <= retries; attempt++) {
+        const controller = new AbortController();
+        const id = setTimeout(() => controller.abort(), timeout);
+        try {
+            const resp = await fetch(url, { ...options, signal: controller.signal });
+            clearTimeout(id);
+
+            // Try to parse JSON even on non-OK to capture error details
+            let body = null;
+            try { body = await resp.clone().json(); } catch (e) { /* ignore json parse */ }
+
+            if (resp.ok) {
+                // return parsed JSON if possible
+                try { return body !== null ? body : await resp.json(); } catch (e) { return null; }
+            }
+
+            // Handle rate limit or server errors with retry
+            if ((resp.status === 429 || resp.status >= 500) && attempt < retries) {
+                const wait = backoff * Math.pow(2, attempt);
+                console.warn(`Fetch attempt ${attempt + 1} to ${url} returned ${resp.status}. Retrying in ${wait}ms.`);
+                await new Promise(r => setTimeout(r, wait));
+                continue;
+            }
+
+            // Non-retriable error
+            const msg = `HTTP ${resp.status} for ${url} - ${JSON.stringify(body)}`;
+            throw new Error(msg);
+        } catch (err) {
+            clearTimeout(id);
+            if (err.name === 'AbortError') {
+                if (attempt < retries) {
+                    const wait = backoff * Math.pow(2, attempt);
+                    console.warn(`Fetch to ${url} timed out. Retrying in ${wait}ms.`);
+                    await new Promise(r => setTimeout(r, wait));
+                    continue;
+                }
+                throw new Error(`Timeout fetching ${url}`);
+            }
+
+            if (attempt < retries) {
+                const wait = backoff * Math.pow(2, attempt);
+                console.warn(`Fetch error (attempt ${attempt + 1}) to ${url}: ${err.message}. Retrying in ${wait}ms.`);
+                await new Promise(r => setTimeout(r, wait));
+                continue;
+            }
+            throw err;
+        }
+    }
+}
+
+/**
  * Schedule password rotation every 7 days
  */
 function schedulePasswordRotation() {
@@ -150,12 +205,9 @@ function schedulePasswordRotation() {
  */
 async function getRobloxUserId(username) {
     try {
-        const response = await fetch(`https://users.roblox.com/v1/users/search?keyword=${username}`);
-        const data = await response.json();
-        
-        if (data.data && data.data.length > 0) {
-            return data.data[0].id;
-        }
+        const url = `https://users.roblox.com/v1/users/search?keyword=${encodeURIComponent(username)}`;
+        const data = await fetchWithRetry(url);
+        if (data && data.data && data.data.length > 0) return data.data[0].id;
         return null;
     } catch (error) {
         console.error('Error fetching Roblox user ID:', error);
@@ -170,8 +222,8 @@ async function getRobloxUserId(username) {
  */
 async function getRobloxUserInfo(userId) {
     try {
-        const response = await fetch(`https://users.roblox.com/v1/users/${userId}`);
-        const data = await response.json();
+        const url = `https://users.roblox.com/v1/users/${userId}`;
+        const data = await fetchWithRetry(url);
         return data || null;
     } catch (error) {
         console.error('Error fetching user info:', error);
@@ -192,19 +244,14 @@ async function getRobloxBadgesCount(userId) {
         // Paginate through all badges
         while (true) {
             const url = `https://badges.roblox.com/v1/users/${userId}/badges?limit=100${cursor ? `&cursor=${cursor}` : ''}`;
-            const response = await fetch(url);
-            const data = await response.json();
-            
-            if (!data.data || data.data.length === 0) {
-                break;
-            }
-            
+            const data = await fetchWithRetry(url);
+
+            if (!data || !data.data || data.data.length === 0) break;
+
             totalBadges += data.data.length;
-            
+
             // Check if there are more pages
-            if (!data.nextPageCursor) {
-                break;
-            }
+            if (!data.nextPageCursor) break;
             cursor = data.nextPageCursor;
         }
         
@@ -222,12 +269,31 @@ async function getRobloxBadgesCount(userId) {
  */
 async function getRobloxFriendsCount(userId) {
     try {
-        const response = await fetch(`https://friends.roblox.com/v1/users/${userId}/friends/count`);
-        const data = await response.json();
-        return data.count || 0;
+        const url = `https://friends.roblox.com/v1/users/${userId}/friends/count`;
+        const data = await fetchWithRetry(url);
+        return (data && typeof data.count === 'number') ? data.count : 0;
     } catch (error) {
         console.error('Error fetching friends count:', error);
         return 0;
+    }
+}
+
+/**
+ * Get a Roblox avatar image URL for a user
+ * @param {number} userId
+ * @returns {Promise<string|null>} image URL or null
+ */
+async function getRobloxAvatarUrl(userId) {
+    try {
+        const url = `https://thumbnails.roblox.com/v1/users/avatar?userIds=${userId}&size=720x720&format=png&isCircular=false`;
+        const data = await fetchWithRetry(url);
+        if (data && data.data && data.data.length > 0) {
+            return data.data[0].imageUrl || null;
+        }
+        return null;
+    } catch (err) {
+        console.error('Error fetching avatar thumbnail:', err);
+        return null;
     }
 }
 
@@ -427,6 +493,15 @@ client.on('interactionCreate', async (interaction) => {
         const friendsStatus = validation.friendsValid ? '✅' : '❌';
         const overallStatus = validation.isValid ? '✅ VALID' : '❌ INVALID';
 
+        // Try to fetch avatar image for embed
+        let avatarUrl = null;
+        try {
+            const userId = await getRobloxUserId(username);
+            if (userId) avatarUrl = await getRobloxAvatarUrl(userId);
+        } catch (err) {
+            console.warn('Could not fetch avatar for', username, err.message);
+        }
+
         const embed = new EmbedBuilder()
             .setTitle(`Validation Results — ${username}`)
             .addFields(
@@ -437,6 +512,12 @@ client.on('interactionCreate', async (interaction) => {
             )
             .setColor(validation.isValid ? 0x00ff00 : 0xff0000)
             .setTimestamp();
+
+        if (avatarUrl) {
+            // set image (large) and thumbnail
+            embed.setImage(avatarUrl);
+            embed.setThumbnail(avatarUrl);
+        }
 
         await interaction.editReply({ embeds: [embed] });
     }
