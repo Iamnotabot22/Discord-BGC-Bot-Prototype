@@ -17,11 +17,21 @@ const client = new Client({
 let BOT_PASSWORD = generatePassword(); // Initial password
 let lastPasswordChange = Date.now();
 const PASSWORD_CHANGE_INTERVAL = 7 * 24 * 60 * 60 * 1000; // 7 days in milliseconds
-const NOTIFICATION_CHANNEL_ID = '1470711974206771210'; // Replace with your notification channel ID
-const AUTHORIZED_USER_ID = '1026450528575684709'; // Only this user can change password
-const DISCORD_TOKEN = '';
-const CLIENT_ID = ''; // Replace with your bot's client ID
-const GUILD_ID = 'YOUR_GUILD_ID'; // Set to your server ID for instant command registration (replace)
+const NOTIFICATION_CHANNEL_ID = process.env.NOTIFICATION_CHANNEL_ID || '1470711974206771210';
+const AUTHORIZED_USER_ID = process.env.AUTHORIZED_USER_ID || '1026450528575684709';
+const DISCORD_TOKEN = process.env.DISCORD_TOKEN || '';
+const CLIENT_ID = process.env.CLIENT_ID || '';
+const GUILD_ID = process.env.GUILD_ID || 'YOUR_GUILD_ID';
+
+// Validate required env vars
+if (!DISCORD_TOKEN) {
+    console.error('❌ Error: DISCORD_TOKEN not found in environment variables. Set it in Replit secrets.');
+    process.exit(1);
+}
+if (!CLIENT_ID) {
+    console.error('❌ Error: CLIENT_ID not found in environment variables. Set it in Replit secrets.');
+    process.exit(1);
+}
 
 // Data storage
 const DATA_DIR = path.join(__dirname, '..', 'data');
@@ -625,6 +635,4 @@ client.on('messageCreate', (msg) => {
     }
 });
 
-
 client.login(DISCORD_TOKEN);
-
